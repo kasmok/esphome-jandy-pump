@@ -9,7 +9,7 @@ JandyPumpCommand JandyPumpNumber::create_command() {
   // On each poll cycle, read the current demand from the pump (sensor addr 0x03)
   return JandyPumpCommand::create_read_sensor_command(
       pump_, 0x03, 4,  // sensor_addr=0x03 (Demand), scale=4
-      [=](JandyPump *pump, uint16_t raw_value) {
+      [this](JandyPump *pump, uint16_t raw_value) {
         float value = (float)raw_value / 4.0f;  // demand scale = /4 for RPM
         this->publish_state(value);
       });
@@ -20,7 +20,7 @@ void JandyPumpNumber::control(float value) {
   ESP_LOGD(TAG, "Setting demand to %d RPM", rpm);
   pump_->queue_command_(JandyPumpCommand::create_set_demand_command(
       pump_, rpm,
-      [=](JandyPump *pump) {
+      [this, value](JandyPump *pump) {
         this->publish_state(value);
       }));
   this->publish_state(value);

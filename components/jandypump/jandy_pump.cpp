@@ -406,7 +406,7 @@ void JandyPump::queue_init_sequence_() {
     cmd.function_ = func;
     cmd.payload_ = payload;
     cmd.send_countdown = 1;  // No retries for init commands
-    cmd.on_data_func_ = [=](JandyPump *pump, const std::vector<uint8_t> data) {
+    cmd.on_data_func_ = [func](JandyPump *pump, const std::vector<uint8_t> data) {
       ESP_LOGD(TAG, "Init response for func 0x%02X, %d bytes", func, data.size());
     };
     return cmd;

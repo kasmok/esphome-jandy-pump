@@ -9,8 +9,9 @@
 ESPHOME_PoolPump.yaml
 ESPHOME_PoolPump_Groked.yaml
 
-# Raw captures (large binary, not useful for component users)
+# Raw captures and logs (large, may contain network details)
 minicom.cap
+logs_*.txt
 
 # PDF specs (copyrighted)
 *.pdf

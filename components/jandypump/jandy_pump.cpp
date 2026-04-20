@@ -204,15 +204,31 @@ void JandyPump::process_rx_packet_(const std::vector<uint8_t> &packet) {
     return;
   }
 
-  uint8_t addr = packet[0];
-  uint8_t func = packet[1];
+  // Strip leading 0x00 bytes — the pump sends a null preamble byte inside the
+  // DLE frame that wasn't present in the original controller's traffic.
+  // 0x00 doesn't affect the checksum (already validated above).
+  size_t offset = 0;
+  while (offset < packet.size() && packet[offset] == 0x00) {
+    offset++;
+  }
+  // Need at least addr + func + checksum after stripping
+  if (offset + 3 > packet.size()) {
+    ESP_LOGW(TAG, "RX packet too short after stripping null preamble");
+    return;
+  }
+
+  uint8_t addr = packet[offset];
+  uint8_t func = packet[offset + 1];
+
+  // Build data vector: addr + func + data (excluding leading nulls and checksum)
+  std::vector<uint8_t> data(packet.begin() + offset, packet.end() - 1);
+
+  ESP_LOGD(TAG, "RX parsed: addr=0x%02X func=0x%02X data_len=%d", addr, func, data.size());
 
   // Check if this is a response to a pending command
   if (!command_queue_.empty()) {
     auto &current_command = command_queue_.front();
     if (current_command != nullptr && current_command->function_ == func) {
-      // Match — extract data (addr + func + data, excluding checksum)
-      std::vector<uint8_t> data(packet.begin(), packet.end() - 1);
       current_command->payload_ = data;
       this->response_queue_.push(std::move(current_command));
       command_queue_.pop_front();

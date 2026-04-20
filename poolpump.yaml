@@ -109,6 +109,40 @@ sensor:
     unit_of_measurement: RPM
     icon: "mdi:speedometer"
 
+  - platform: jandypump
+    name: "Pool Pump Power"
+    type: watts
+    unit_of_measurement: W
+    device_class: power
+    state_class: measurement
+    icon: "mdi:flash"
+
+  - platform: jandypump
+    name: "Pool Pump Input Power"
+    type: power
+    unit_of_measurement: W
+    device_class: power
+    state_class: measurement
+    icon: "mdi:flash-outline"
+
+  - platform: jandypump
+    name: "Pool Pump Motor Current"
+    type: current
+    unit_of_measurement: A
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 3
+    icon: "mdi:current-ac"
+
+  - platform: jandypump
+    name: "Pool Pump DC Bus Voltage"
+    type: voltage
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: "mdi:sine-wave"
+
 number:
   - platform: jandypump
     name: "Pool Pump Target RPM"

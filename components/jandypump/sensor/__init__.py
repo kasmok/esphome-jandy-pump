@@ -20,7 +20,11 @@ JandyPumpSensor = jandy_pump_ns.class_(
 
 SENSOR_TYPES = {
     "rpm": {"address": 0x00, "scale": 4},
+    "demand": {"address": 0x03, "scale": 4},
+    "power": {"address": 0x05, "scale": 1},
     "watts": {"address": 0x0A, "scale": 1},
+    "current": {"address": 0x01, "scale": 1000},
+    "voltage": {"address": 0x06, "scale": 64},
     "custom": {},
 }
 

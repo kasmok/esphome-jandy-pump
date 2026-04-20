@@ -9,8 +9,9 @@ JandyPumpCommand JandyPumpNumber::create_command() {
   // On each poll cycle, read the current demand from the pump (sensor addr 0x03)
   return JandyPumpCommand::create_read_sensor_command(
       pump_, 0x03, 4,  // sensor_addr=0x03 (Demand), scale=4
-      [=](JandyPump *pump, uint16_t value) {
-        this->publish_state((float)value);
+      [=](JandyPump *pump, uint16_t raw_value) {
+        float value = (float)raw_value / 4.0f;  // demand scale = /4 for RPM
+        this->publish_state(value);
       });
 }
 

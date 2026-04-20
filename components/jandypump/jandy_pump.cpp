@@ -334,10 +334,10 @@ JandyPumpCommand JandyPumpCommand::create_read_sensor_command(
   cmd.on_data_func_ = [=](JandyPump *pump, const std::vector<uint8_t> data) {
     // Response: [addr=1F] [func=45] [sensor_addr] [val_lo] [val_hi]
     if (data.size() >= 5) {
-      uint16_t value = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
-      value /= scale;
-      ESP_LOGD(TAG, "Sensor 0x%02X = %d (scale /%d)", sensor_addr, value, scale);
-      on_value_func(pump, value);
+      uint16_t raw = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+      float value = (float)raw / (float)scale;
+      ESP_LOGD(TAG, "Sensor 0x%02X = %.3f (raw=%d, scale /%d)", sensor_addr, value, raw, scale);
+      on_value_func(pump, raw);
     } else if (data.size() >= 3) {
       // Short response — possibly no value available
       ESP_LOGD(TAG, "Sensor 0x%02X: short response (%d bytes)", sensor_addr, data.size());

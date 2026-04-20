@@ -13,6 +13,8 @@ void JandyPump::setup() {
     this->flow_control_pin_->digital_write(false);  // RX mode
   }
   ESP_LOGCONFIG(TAG, "Jandy pump setup complete");
+  // Queue the initialization sequence on first boot
+  this->queue_init_sequence_();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -58,6 +60,11 @@ void JandyPump::loop() {
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 void JandyPump::update() {
+  if (!this->initialized_) {
+    ESP_LOGD(TAG, "Re-queuing init sequence (not yet initialized)");
+    this->queue_init_sequence_();
+    return;
+  }
   ESP_LOGV(TAG, "Polling pump");
   for (auto item : items_)
     queue_command_(item->create_command());
@@ -225,6 +232,21 @@ void JandyPump::process_rx_packet_(const std::vector<uint8_t> &packet) {
 
   ESP_LOGD(TAG, "RX parsed: addr=0x%02X func=0x%02X data_len=%d", addr, func, data.size());
 
+  // Check for NACK response (addr=0xFF)
+  if (addr == JANDY_ADDR_NACK) {
+    uint8_t nack_code = (data.size() >= 3) ? data[2] : 0;
+    ESP_LOGW(TAG, "NACK for func 0x%02X, code=0x%02X", func, nack_code);
+    // Remove the pending command — don't retry NACKs
+    if (!command_queue_.empty()) {
+      auto &current_command = command_queue_.front();
+      if (current_command != nullptr && current_command->function_ == func) {
+        command_queue_.pop_front();
+      }
+    }
+    this->waiting_for_response_ = false;
+    return;
+  }
+
   // Check if this is a response to a pending command
   if (!command_queue_.empty()) {
     auto &current_command = command_queue_.front();
@@ -368,6 +390,74 @@ JandyPumpCommand JandyPumpCommand::create_set_demand_command(
     on_confirmation_func(pump);
   };
   return cmd;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Initialization sequence — mimics the original Jandy controller startup.
+// The pump requires ReadID and Config handshakes before accepting Set Demand
+// or Read Sensor commands. Without this, those commands receive NACK 0x03.
+void JandyPump::queue_init_sequence_() {
+  ESP_LOGD(TAG, "Queuing pump initialization sequence");
+
+  // Helper lambda to create a simple fire-and-forget command
+  auto make_init_cmd = [this](uint8_t func, std::vector<uint8_t> payload) {
+    JandyPumpCommand cmd = {};
+    cmd.pump_ = this;
+    cmd.function_ = func;
+    cmd.payload_ = payload;
+    cmd.send_countdown = 1;  // No retries for init commands
+    cmd.on_data_func_ = [=](JandyPump *pump, const std::vector<uint8_t> data) {
+      ESP_LOGD(TAG, "Init response for func 0x%02X, %d bytes", func, data.size());
+    };
+    return cmd;
+  };
+
+  // Sequence observed from original Jandy controller capture (minicom.cap):
+  //   Status, bare Read Sensor, ReadID page 3, Config page 6,
+  //   Status, Read Sensor 0x01, ReadID page 4, Config page 6,
+  //   Status, Read Sensor 0x02, Config page 6,
+  //   Status, Read Sensor 0x03, ReadID page 3, Config page 6,
+  //   Status, Read Sensor 0x04, ReadID page 4,
+  //   Set Demand, Go  (now accepted)
+
+  // Step 1: Status + bare Read Sensor + ReadID page 3 + Config page 6
+  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {}));  // bare, no addr
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x03}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+
+  // Step 2: Status + Read Sensor 0x01 + ReadID page 4 + Config page 6
+  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x01}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x04}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+
+  // Step 3: Status + Read Sensor 0x02 + Config page 6
+  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x02}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+
+  // Step 4: Status + Read Sensor 0x03 + ReadID page 3 + Config page 6
+  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x03}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x03}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+
+  // Step 5: Status + Read Sensor 0x04 + ReadID page 4
+  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x04}));
+  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x04}));
+
+  // Final command: mark initialization as complete
+  JandyPumpCommand done_cmd = {};
+  done_cmd.pump_ = this;
+  done_cmd.function_ = JANDY_FUNC_STATUS;  // one last status check
+  done_cmd.send_countdown = 1;
+  done_cmd.on_data_func_ = [this](JandyPump *pump, const std::vector<uint8_t> data) {
+    ESP_LOGI(TAG, "Initialization sequence complete");
+    this->initialized_ = true;
+  };
+  queue_command_(done_cmd);
 }
 
 }  // namespace jandy_pump

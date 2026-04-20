@@ -1,5 +1,9 @@
 # ESPHome Jandy/Zodiac VS-FHP Pool Pump Controller
 
+Note: This code is pre-alpha and not tested.  Do not use.  I used claude with RS-485 logging and https://github.com/gazoodle/CenturyVSPump 
+
+Feel free to leave feedback.
+
 Custom [ESPHome](https://esphome.io/) component to control **Jandy/Zodiac VS-FHP (VSFloPro)** variable-speed pool pumps via RS-485, replacing the original Jandy controller. Exposes pump on/off, target RPM, and current RPM to [Home Assistant](https://www.home-assistant.io/).
 
 ## Hardware

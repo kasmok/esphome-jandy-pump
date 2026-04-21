@@ -116,6 +116,7 @@ class JandyPump : public PollingComponent, public uart::UARTDevice {
   void process_rx_packet_(const std::vector<uint8_t> &packet);
   bool send_next_command_();
   void queue_init_sequence_();
+  void send_fire_and_forget_(uint8_t func, const std::vector<uint8_t> &payload, uint8_t cs_offset);
 
  private:
   GPIOPin *flow_control_pin_{nullptr};

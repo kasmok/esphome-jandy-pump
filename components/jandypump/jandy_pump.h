@@ -115,7 +115,6 @@ class JandyPump : public PollingComponent, public uart::UARTDevice {
   void process_rx_byte_(uint8_t byte);
   void process_rx_packet_(const std::vector<uint8_t> &packet);
   bool send_next_command_();
-  void queue_init_sequence_();
   void send_fire_and_forget_(uint8_t func, const std::vector<uint8_t> &payload, uint8_t cs_offset);
 
  private:
@@ -135,10 +134,6 @@ class JandyPump : public PollingComponent, public uart::UARTDevice {
   bool waiting_for_response_{false};
   uint32_t response_timeout_{500};  // ms
 
-  // Initialization state — pump requires ReadID/Config handshake before
-  // it will accept Set Demand or Read Sensor commands
-  bool initialized_{false};
-  uint8_t init_responses_received_{0};  // Track how many init handshake responses we got
 
  public:
   std::vector<JandyPumpItemBase *> items_;

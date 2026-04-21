@@ -36,6 +36,7 @@ ADDR_ROLE = {
     0x1F: ('PUMP→CTRL', 'Pump sending Status/Sensor/Demand response'),
     0x20: ('PUMP→CTRL', 'Pump sending ID/Config response'),
     0x01: ('PUMP→CTRL', 'Pump sending Go/Stop ACK'),
+    0xFF: ('PUMP→CTRL', 'Pump NACK (error/rejection)'),
 }
 
 # Status byte (from Status command response, and Sensor page 0 addr 0x08)
@@ -64,7 +65,7 @@ SENSOR_P0 = {
     0x0C: ('Num Current Faults', lambda v: f'{v}'),
     0x0E: ('Ramp Status',        lambda v: f'0x{v:02X}'),
     0x0F: ('Num Total Faults',   lambda v: f'{v}'),
-    0x10: ('Prime Status',       lambda v: ['priming-stopped','priming-running','priming-over'].get(v, f'0x{v:02X}') if isinstance(v,int) else f'0x{v:02X}'),
+    0x10: ('Prime Status',       lambda v: {0:'priming-stopped',1:'priming-running',2:'priming-over'}.get(v, f'0x{v:02X}')),
     0x12: ('IGBT Temperature',   lambda v: f'{v/128:.1f} °C'),
     0x14: ('External Input Status', lambda v: f'0x{v:02X}'),
     0x15: ('Reference Speed',    lambda v: f'{v/4:.0f} RPM'),
@@ -254,7 +255,15 @@ def decode_packet(inner: bytes) -> list:
     func_name = FUNC_NAMES.get(func, f'UNKNOWN(0x{func:02X})')
     lines.append(f'  {direction}  addr=0x{addr:02X} ({role})  func=0x{func:02X} ({func_name})')
 
-    # Error reply: MSB of func set
+    # NACK: addr=0xFF means pump rejected the command
+    if addr == 0xFF:
+        nack = data[0] if data else 0
+        nack_desc = NACK_CODES.get(nack, f'unknown error 0x{nack:02X}')
+        func_name_short = FUNC_NAMES.get(func, f'0x{func:02X}')
+        lines.append(f'  ← NACK for {func_name_short}: code 0x{nack:02X} — {nack_desc}')
+        return lines
+
+    # Error reply: MSB of func set (EPC Modbus style, not typically seen in Jandy DLE)
     if func & 0x80:
         orig_func = func & 0x7F
         orig_name = FUNC_NAMES.get(orig_func, f'0x{orig_func:02X}')
@@ -515,7 +524,7 @@ def main():
     print(f'  Skipped bytes  : {skipped_bytes:,}  (not inside valid frames)')
     print(f'  Total packets  : {stats["total"]:,}')
     print(f'  Checksum OK    : {stats["cs_ok"]:,}')
-    print(f'  Checksum +5    : {stats["cs_quirk"]:,}  (known firmware quirk of original controller)')
+    print(f'  Checksum +5    : {stats["cs_quirk"]:,}  (firmware quirk: Config cmds + addr 0x20 responses)')
     print(f'  Checksum ART   : {stats["cs_artifact"]:,}  (minicom stripped a control char; packet reconstructed)')
     print(f'  Checksum bad   : {stats["cs_bad"]:,}  (genuinely corrupted / partial packets)')
     print()

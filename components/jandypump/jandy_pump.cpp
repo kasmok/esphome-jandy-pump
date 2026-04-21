@@ -13,8 +13,6 @@ void JandyPump::setup() {
     this->flow_control_pin_->digital_write(false);  // RX mode
   }
   ESP_LOGCONFIG(TAG, "Jandy pump setup complete");
-  // Queue the initialization sequence on first boot
-  this->queue_init_sequence_();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -60,15 +58,12 @@ void JandyPump::loop() {
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 void JandyPump::update() {
-  if (!this->initialized_) {
-    // Only re-queue if the command queue is empty (previous attempt finished)
-    if (this->command_queue_.empty()) {
-      ESP_LOGD(TAG, "Re-queuing init sequence (not yet initialized)");
-      this->queue_init_sequence_();
-    }
-    return;
-  }
-  ESP_LOGV(TAG, "Polling pump");
+  // Send Config page 6 fire-and-forget on every poll cycle.
+  // The original controller does this — it's what unlocks Read Sensor
+  // and Set Demand. Uses checksum+5 (matching original controller).
+  ESP_LOGD(TAG, "Poll cycle: sending Config page 6 + polling items");
+  send_fire_and_forget_(JANDY_FUNC_CONFIG, {0x06}, 5);
+
   for (auto item : items_)
     queue_command_(item->create_command());
 }
@@ -277,19 +272,6 @@ bool JandyPump::send_next_command_() {
   if (elapsed > this->command_throttle_ && !this->waiting_for_response_ && !command_queue_.empty()) {
     auto &command = command_queue_.front();
 
-    // Special handling for fire-and-forget Config commands (func marker 0xFF)
-    if (command->function_ == 0xFF) {
-      ESP_LOGD(TAG, "Sending Config fire-and-forget (both checksums)");
-      // Send Config with standard checksum
-      send_fire_and_forget_(JANDY_FUNC_CONFIG, command->payload_, 0);
-      // Small delay then send with +5 checksum (pump quirk)
-      delay(20);
-      send_fire_and_forget_(JANDY_FUNC_CONFIG, command->payload_, 5);
-      this->last_command_timestamp_ = millis();
-      command_queue_.pop_front();
-      return true;
-    }
-
     if (command->send_countdown < 1) {
       ESP_LOGD(TAG, "Command 0x%02X no response — removed from queue", command->function_);
       command_queue_.pop_front();
@@ -427,97 +409,6 @@ void JandyPump::send_fire_and_forget_(uint8_t func, const std::vector<uint8_t> &
   this->waiting_for_response_ = false;
 }
 
-void JandyPump::queue_init_sequence_() {
-  ESP_LOGI(TAG, "Queuing pump initialization sequence");
-  this->init_responses_received_ = 0;
-
-  // Helper to create an init command that expects a response
-  auto make_init_cmd = [this](uint8_t func, std::vector<uint8_t> payload) {
-    JandyPumpCommand cmd = {};
-    cmd.pump_ = this;
-    cmd.function_ = func;
-    cmd.payload_ = payload;
-    cmd.send_countdown = 1;  // Single attempt per init step
-    cmd.on_data_func_ = [this, func](JandyPump *pump, const std::vector<uint8_t> data) {
-      this->init_responses_received_++;
-      ESP_LOGI(TAG, "Init response for func 0x%02X, %d bytes (total: %d)",
-               func, data.size(), this->init_responses_received_);
-    };
-    return cmd;
-  };
-
-  // Helper to send Config as fire-and-forget (pump rarely responds — only 1/105 in capture)
-  // Also sends with BOTH standard and +5 checksum, since we don't know which the pump validates
-  auto make_config_step = [this](std::vector<uint8_t> payload) {
-    JandyPumpCommand cmd = {};
-    cmd.pump_ = this;
-    cmd.function_ = 0xFF;  // Marker for "special handling"
-    cmd.payload_ = payload;
-    cmd.send_countdown = 1;
-    cmd.on_data_func_ = [this, payload](JandyPump *pump, const std::vector<uint8_t> data) {
-      // This callback fires when the command is dequeued for "processing"
-      // We override send behavior below
-    };
-    return cmd;
-  };
-
-  // Sequence from original Jandy controller capture (minicom.cap):
-  //   Status, bare Read Sensor, ReadID page 3, Config page 6,
-  //   Status, Read Sensor 0x01, ReadID page 4, Config page 6,
-  //   Status, Read Sensor 0x02, Config page 6,
-  //   Status, Read Sensor 0x03, ReadID page 3, Config page 6,
-  //   Status, Read Sensor 0x04, ReadID page 4
-  //
-  // Config (0x64): fire-and-forget — pump almost never responds.
-  //   Original controller uses checksum+5. We try both standard and +5.
-  // ReadID (0x46): responses use checksum+5 (handled in RX validation).
-
-  // Step 1: Status + bare Read Sensor + ReadID page 3 + Config page 6
-  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {}));  // bare, no addr
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x03}));
-  queue_command_(make_config_step({0x06}));
-
-  // Step 2: Status + Read Sensor 0x01 + ReadID page 4 + Config page 6
-  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x01}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x04}));
-  queue_command_(make_config_step({0x06}));
-
-  // Step 3: Status + Read Sensor 0x02 + Config page 6
-  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x02}));
-  queue_command_(make_config_step({0x06}));
-
-  // Step 4: Status + Read Sensor 0x03 + ReadID page 3 + Config page 6
-  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x03}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x03}));
-  queue_command_(make_config_step({0x06}));
-
-  // Step 5: Status + Read Sensor 0x04 + ReadID page 4
-  queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x04}));
-  queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x04}));
-
-  // Final command: evaluate init result
-  JandyPumpCommand done_cmd = {};
-  done_cmd.pump_ = this;
-  done_cmd.function_ = JANDY_FUNC_STATUS;
-  done_cmd.send_countdown = 1;
-  done_cmd.on_data_func_ = [this](JandyPump *pump, const std::vector<uint8_t> data) {
-    ESP_LOGI(TAG, "Init sequence done — %d responses received", this->init_responses_received_);
-    // Accept init if we got Status responses (the minimum).
-    // Read Sensor/ReadID may NACK initially but work after Config unlocks them.
-    // We'll know on the first normal poll cycle.
-    if (this->init_responses_received_ >= 3) {
-      ESP_LOGI(TAG, "Initialization complete — starting normal polling");
-      this->initialized_ = true;
-    } else {
-      ESP_LOGW(TAG, "Init got only %d responses — will retry", this->init_responses_received_);
-    }
-  };
-  queue_command_(done_cmd);
 }
 
 }  // namespace jandy_pump

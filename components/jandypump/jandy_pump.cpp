@@ -58,14 +58,35 @@ void JandyPump::loop() {
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 void JandyPump::update() {
-  // The original controller sends ReadID + Config on every poll cycle.
-  // ReadID appears to be the key that authorizes this controller to the pump —
-  // without it, Read Sensor and Set Demand get NACK 0x03, and Config is ignored.
-  //
-  // Sequence per cycle (matching original capture):
-  //   ReadID page 3 → Config page 6 → Status → [sensors...]
+  // The original controller's poll cycle order (from minicom.cap) is:
+  //   Status → bare Read Sensor → ReadID page 3 → Config page 6 → [sensors...]
+  // Order matters — the pump NACKs ReadID/Config if Status hasn't been sent first.
 
-  // ReadID page 3 — queued as normal command so we wait for the response
+  // 1. Status — must be first to "wake" the pump for this cycle
+  JandyPumpCommand status_cmd = {};
+  status_cmd.pump_ = this;
+  status_cmd.function_ = JANDY_FUNC_STATUS;
+  status_cmd.send_countdown = 1;
+  status_cmd.on_data_func_ = [](JandyPump *pump, const std::vector<uint8_t> data) {
+    if (data.size() > 2) {
+      ESP_LOGD(TAG, "Status: 0x%02X", data[2]);
+    } else {
+      ESP_LOGD(TAG, "Status: stopped");
+    }
+  };
+  queue_command_(status_cmd);
+
+  // 2. Bare Read Sensor (no sensor address) — original controller does this
+  JandyPumpCommand bare_sensor_cmd = {};
+  bare_sensor_cmd.pump_ = this;
+  bare_sensor_cmd.function_ = JANDY_FUNC_READ_SENSOR;
+  bare_sensor_cmd.send_countdown = 1;
+  bare_sensor_cmd.on_data_func_ = [](JandyPump *pump, const std::vector<uint8_t> data) {
+    ESP_LOGI(TAG, "Bare Read Sensor response: %d bytes", data.size());
+  };
+  queue_command_(bare_sensor_cmd);
+
+  // 3. ReadID page 3
   JandyPumpCommand readid_cmd = {};
   readid_cmd.pump_ = this;
   readid_cmd.function_ = JANDY_FUNC_READ_ID;
@@ -76,9 +97,10 @@ void JandyPump::update() {
   };
   queue_command_(readid_cmd);
 
-  // Config page 6 — fire-and-forget with checksum+5 (matching original controller)
+  // 4. Config page 6 — fire-and-forget with checksum+5
   send_fire_and_forget_(JANDY_FUNC_CONFIG, {0x06}, 5);
 
+  // 5. Sensor/switch/number polling items
   for (auto item : items_)
     queue_command_(item->create_command());
 }

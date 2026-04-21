@@ -64,6 +64,21 @@ checksum = (0x10 + 0x02 + addr + func + data_bytes...) & 0xFF
 
 The checksum is computed over the preamble bytes (`0x10`, `0x02`) plus all inner bytes (address, function, data) **before** DLE escaping. The checksum byte itself is also subject to DLE escaping when transmitted.
 
+#### Checksum +5 Quirk
+
+Config (`0x64`) commands and all responses from address `0x20` (ReadID and Config responses) use a checksum that is **5 higher** than the standard formula:
+
+```
+checksum_quirk = (standard_checksum + 5) & 0xFF
+```
+
+This is a firmware quirk present in both the original Jandy controller board and the pump drive board. When **sending** Config commands, the checksum must include the +5 offset or the pump will reject them. When **receiving** responses from addr `0x20`, both standard and +5 checksums should be accepted.
+
+This quirk was confirmed by:
+1. Every Config command in `minicom.cap` (105 packets) uses checksum+5
+2. Every ReadID response from addr `0x20` (7 packets) uses checksum+5
+3. Live testing: the pump ignored Config commands sent with standard checksum, breaking the init handshake
+
 ### Example Packet (Go command)
 
 ```
@@ -246,6 +261,46 @@ Commits configuration changes to non-volatile memory.
 
 ---
 
+## Initialization Sequence
+
+The pump **requires a ReadID/Config handshake** before it will accept Read Sensor (`0x45`) or Set Demand (`0x44`) commands. Without this handshake, these commands receive NACK code `0x03` (data out of range). Go (`0x41`), Stop (`0x42`), and Status (`0x43`) work without initialization.
+
+### Observed Startup Sequence (from minicom.cap)
+
+The original Jandy controller performs this sequence on power-up, cycling through sensor addresses and identification pages:
+
+```
+ 1. Status (0x43)
+ 2. Read Sensor (0x45) — bare, no sensor address
+ 3. ReadID (0x46) page 3
+ 4. Config (0x64) page 6        ← uses checksum+5
+ 5. Status (0x43)
+ 6. Read Sensor (0x45) addr 0x01
+ 7. ReadID (0x46) page 4
+ 8. Config (0x64) page 6        ← uses checksum+5
+ 9. Status (0x43)
+10. Read Sensor (0x45) addr 0x02
+11. Config (0x64) page 6        ← uses checksum+5
+12. Status (0x43)
+13. Read Sensor (0x45) addr 0x03  → first successful sensor response (Demand = 600 RPM)
+14. ReadID (0x46) page 3
+15. Config (0x64) page 6        ← uses checksum+5
+16. Status (0x43)
+17. Read Sensor (0x45) addr 0x04
+18. ReadID (0x46) page 4
+```
+
+After this sequence completes, the controller begins normal polling (Status + Read Sensor cycles) and can send Set Demand and Go commands.
+
+### Key Details
+
+- The **bare Read Sensor** (step 2) has no sensor address byte — just `78 45 [cs]`. The pump responds with an ACK but no value.
+- **Config commands must use checksum+5** or the pump silently ignores them, breaking the handshake.
+- **ReadID/Config responses come from addr `0x20`** with checksum+5. Receivers must accept this variant.
+- The minimum required handshake steps are not fully determined — the `jandypump` component replays the full observed sequence to be safe.
+
+---
+
 ## NACK (Error) Responses
 
 When the pump rejects a command, it responds with source address `0xFF`:
@@ -336,7 +391,7 @@ The Go command (`0x41`) successfully starts the pump:
 
 The pump stopped because no demand value was successfully set (all Set Demand commands received NACKs), and the command response matching was broken by the leading null byte, so the Go ACK was never processed by the firmware.
 
-#### Finding 3: Set Demand and Read Sensor receive NACKs
+#### Finding 3: Set Demand and Read Sensor receive NACKs (RESOLVED)
 
 All Set Demand (`0x44`) and Read Sensor (`0x45`) commands receive NACK code `0x03` (data out of range):
 
@@ -345,10 +400,9 @@ TX: 10 02 78 44 60 09 37 10 03    (Set Demand 600 RPM: demand=2400, bytes 60 09)
 RX: 00 FF 44 03 58                 (NACK: data out of range)
 ```
 
-Possible causes under investigation:
-- The demand encoding may differ from what was observed in `minicom.cap` (the original controller may use a different scale factor or format)
-- The sensor address format may need a page prefix or different addressing scheme
-- The pump may require a specific initialization sequence before accepting demand/sensor commands
+**Root cause:** The pump requires a ReadID (`0x46`) and Config (`0x64`) initialization handshake before it will accept Read Sensor or Set Demand commands. See [Initialization Sequence](#initialization-sequence) above.
+
+**Contributing factor:** Config commands must be sent with checksum+5, and Config/ReadID responses from the pump also use checksum+5. The firmware was dropping these responses as checksum mismatches, causing the init handshake to silently fail even after the init sequence code was added.
 
 #### Finding 4: Status response has trailing padding
 
@@ -361,13 +415,15 @@ Live test format:    1F 43 0B 00 00 00 [cs]
 
 The additional padding bytes do not affect parsing as long as `data[2]` is used for the status value.
 
-### Next Steps
+### Resolution Summary
 
-1. **Fix response matching** (done) — strip leading null bytes from RX packets
-2. **Investigate Set Demand NACKs** — may need different demand encoding, initialization sequence, or the pump may need to be in a specific state
-3. **Investigate Read Sensor NACKs** — may need page selection or different addressing
-4. **Test with demand set before Go** — the original controller likely sends Set Demand before Go
-5. **Compare live TX bytes with minicom.cap** — verify our command packets exactly match the original controller's
+| Issue | Status | Fix |
+|-------|--------|-----|
+| Leading null byte in responses | **Fixed** | Strip leading `0x00` after checksum validation |
+| Set Demand / Read Sensor NACKs | **Fixed** | Added init handshake sequence (ReadID + Config) |
+| Init handshake silently failing | **Fixed** | Send Config with checksum+5; accept +5 on RX |
+| Sensor values not updating in HA | **Pending test** | Requires successful init handshake (fix above) |
+| Speed change not working | **Pending test** | Requires successful init handshake (fix above) |
 
 ---
 
@@ -389,7 +445,7 @@ python3 pg/parse_cap.py minicom.cap --errors-only      # show problem packets
 
 **minicom strips `0x0B`:** The `minicom.cap` file was recorded using minicom in terminal mode, which silently strips control characters. The byte `0x0B` (ASCII VT / vertical tab) is the most commonly affected, impacting approximately 1,473 of 6,274 packets. `parse_cap.py` detects and reconstructs these missing bytes automatically (labeled `CS:ART` in output).
 
-**Checksum +5 quirk:** Some packets from the original controller (address `0x20`, function `0x64`) have checksums consistently 5 higher than the standard formula. This is a firmware quirk of the original Jandy UI board, not a protocol error.
+**Checksum +5 quirk:** Config (`0x64`) commands and all addr `0x20` responses use checksum+5. This affects both sending and receiving — see [Checksum +5 Quirk](#checksum-5-quirk) for details. Failing to account for this breaks the initialization handshake.
 
 ---
 

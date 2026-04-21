@@ -76,13 +76,14 @@ void JandyPump::queue_command_(const JandyPumpCommand &command) {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
-void JandyPump::send_jandy_raw(const std::vector<uint8_t> &payload) {
+void JandyPump::send_jandy_raw(const std::vector<uint8_t> &payload, uint8_t cs_offset) {
   // Compute checksum: sum(0x10, 0x02, payload_bytes...) & 0xFF
+  // cs_offset adds to checksum (5 for Config commands — original controller quirk)
   uint8_t checksum = 0x10 + 0x02;
   for (auto b : payload) {
     checksum += b;
   }
-  checksum &= 0xFF;
+  checksum = (checksum + cs_offset) & 0xFF;
 
   // Build the wire frame with DLE escaping
   std::vector<uint8_t> frame;
@@ -206,8 +207,12 @@ void JandyPump::process_rx_packet_(const std::vector<uint8_t> &packet) {
   expected_cs &= 0xFF;
   uint8_t actual_cs = packet.back();
 
-  if (expected_cs != actual_cs) {
-    ESP_LOGW(TAG, "RX checksum mismatch: expected 0x%02X, got 0x%02X", expected_cs, actual_cs);
+  // Accept standard checksum OR checksum+5 (known pump firmware quirk for
+  // addr=0x20 responses and Config 0x64 — see PROTOCOL.md "Checksum +5 quirk")
+  uint8_t expected_cs_plus5 = (expected_cs + 5) & 0xFF;
+  if (expected_cs != actual_cs && expected_cs_plus5 != actual_cs) {
+    ESP_LOGW(TAG, "RX checksum mismatch: expected 0x%02X (or +5=0x%02X), got 0x%02X",
+             expected_cs, expected_cs_plus5, actual_cs);
     return;
   }
 
@@ -290,7 +295,7 @@ bool JandyPumpCommand::send() {
   payload.push_back(JANDY_PUMP_ADDR);
   payload.push_back(function_);
   payload.insert(payload.end(), payload_.begin(), payload_.end());
-  pump_->send_jandy_raw(payload);
+  pump_->send_jandy_raw(payload, cs_offset_);
   this->send_countdown--;
   return true;
 }
@@ -397,17 +402,21 @@ JandyPumpCommand JandyPumpCommand::create_set_demand_command(
 // The pump requires ReadID and Config handshakes before accepting Set Demand
 // or Read Sensor commands. Without this, those commands receive NACK 0x03.
 void JandyPump::queue_init_sequence_() {
-  ESP_LOGD(TAG, "Queuing pump initialization sequence");
+  ESP_LOGI(TAG, "Queuing pump initialization sequence");
+  this->init_responses_received_ = 0;
 
-  // Helper lambda to create a simple fire-and-forget command
-  auto make_init_cmd = [this](uint8_t func, std::vector<uint8_t> payload) {
+  // Helper lambda to create init commands with proper logging and response tracking
+  auto make_init_cmd = [this](uint8_t func, std::vector<uint8_t> payload, uint8_t cs_off = 0) {
     JandyPumpCommand cmd = {};
     cmd.pump_ = this;
     cmd.function_ = func;
     cmd.payload_ = payload;
-    cmd.send_countdown = 1;  // No retries for init commands
-    cmd.on_data_func_ = [func](JandyPump *pump, const std::vector<uint8_t> data) {
-      ESP_LOGD(TAG, "Init response for func 0x%02X, %d bytes", func, data.size());
+    cmd.send_countdown = 3;  // Retry init commands
+    cmd.cs_offset_ = cs_off;
+    cmd.on_data_func_ = [this, func](JandyPump *pump, const std::vector<uint8_t> data) {
+      this->init_responses_received_++;
+      ESP_LOGI(TAG, "Init response for func 0x%02X, %d bytes (total responses: %d)",
+               func, data.size(), this->init_responses_received_);
     };
     return cmd;
   };
@@ -419,29 +428,32 @@ void JandyPump::queue_init_sequence_() {
   //   Status, Read Sensor 0x03, ReadID page 3, Config page 6,
   //   Status, Read Sensor 0x04, ReadID page 4,
   //   Set Demand, Go  (now accepted)
+  //
+  // IMPORTANT: Config (0x64) commands use checksum+5 quirk (cs_off=5)
+  // ReadID (0x46) responses also use checksum+5 (handled in RX validation)
 
   // Step 1: Status + bare Read Sensor + ReadID page 3 + Config page 6
   queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
   queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {}));  // bare, no addr
   queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x03}));
-  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}, 5));
 
   // Step 2: Status + Read Sensor 0x01 + ReadID page 4 + Config page 6
   queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
   queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x01}));
   queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x04}));
-  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}, 5));
 
   // Step 3: Status + Read Sensor 0x02 + Config page 6
   queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
   queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x02}));
-  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}, 5));
 
   // Step 4: Status + Read Sensor 0x03 + ReadID page 3 + Config page 6
   queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
   queue_command_(make_init_cmd(JANDY_FUNC_READ_SENSOR, {0x03}));
   queue_command_(make_init_cmd(JANDY_FUNC_READ_ID, {0x03}));
-  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}));
+  queue_command_(make_init_cmd(JANDY_FUNC_CONFIG, {0x06}, 5));
 
   // Step 5: Status + Read Sensor 0x04 + ReadID page 4
   queue_command_(make_init_cmd(JANDY_FUNC_STATUS, {}));
@@ -452,10 +464,16 @@ void JandyPump::queue_init_sequence_() {
   JandyPumpCommand done_cmd = {};
   done_cmd.pump_ = this;
   done_cmd.function_ = JANDY_FUNC_STATUS;  // one last status check
-  done_cmd.send_countdown = 1;
+  done_cmd.send_countdown = 3;
   done_cmd.on_data_func_ = [this](JandyPump *pump, const std::vector<uint8_t> data) {
-    ESP_LOGI(TAG, "Initialization sequence complete");
-    this->initialized_ = true;
+    ESP_LOGI(TAG, "Init sequence done — %d responses received", this->init_responses_received_);
+    if (this->init_responses_received_ >= 10) {
+      ESP_LOGI(TAG, "Initialization successful");
+      this->initialized_ = true;
+    } else {
+      ESP_LOGW(TAG, "Init incomplete (only %d/18 responses) — will retry on next update",
+               this->init_responses_received_);
+    }
   };
   queue_command_(done_cmd);
 }

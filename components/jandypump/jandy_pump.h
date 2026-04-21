@@ -55,6 +55,7 @@ class JandyPumpCommand {
   std::vector<uint8_t> payload_ = {};
   std::function<void(JandyPump *pump, const std::vector<uint8_t> &data)> on_data_func_;
   uint8_t send_countdown{MAX_SEND_REPEATS};
+  uint8_t cs_offset_{0};  // Checksum offset (5 for Config commands — pump quirk)
 
   bool send();
 
@@ -107,7 +108,8 @@ class JandyPump : public PollingComponent, public uart::UARTDevice {
   void queue_command_(const JandyPumpCommand &cmd);
 
   // Send a raw Jandy DLE-framed packet: [addr] [func] [data...]
-  void send_jandy_raw(const std::vector<uint8_t> &payload);
+  // cs_offset adds to the checksum (use 5 for Config 0x64 commands — pump quirk)
+  void send_jandy_raw(const std::vector<uint8_t> &payload, uint8_t cs_offset = 0);
 
  protected:
   void process_rx_byte_(uint8_t byte);
@@ -135,6 +137,7 @@ class JandyPump : public PollingComponent, public uart::UARTDevice {
   // Initialization state — pump requires ReadID/Config handshake before
   // it will accept Set Demand or Read Sensor commands
   bool initialized_{false};
+  uint8_t init_responses_received_{0};  // Track how many init handshake responses we got
 
  public:
   std::vector<JandyPumpItemBase *> items_;

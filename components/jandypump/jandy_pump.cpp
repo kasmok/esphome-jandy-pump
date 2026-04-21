@@ -58,10 +58,25 @@ void JandyPump::loop() {
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 void JandyPump::update() {
-  // Send Config page 6 fire-and-forget on every poll cycle.
-  // The original controller does this — it's what unlocks Read Sensor
-  // and Set Demand. Uses checksum+5 (matching original controller).
-  ESP_LOGD(TAG, "Poll cycle: sending Config page 6 + polling items");
+  // The original controller sends ReadID + Config on every poll cycle.
+  // ReadID appears to be the key that authorizes this controller to the pump —
+  // without it, Read Sensor and Set Demand get NACK 0x03, and Config is ignored.
+  //
+  // Sequence per cycle (matching original capture):
+  //   ReadID page 3 → Config page 6 → Status → [sensors...]
+
+  // ReadID page 3 — queued as normal command so we wait for the response
+  JandyPumpCommand readid_cmd = {};
+  readid_cmd.pump_ = this;
+  readid_cmd.function_ = JANDY_FUNC_READ_ID;
+  readid_cmd.payload_ = {0x03};
+  readid_cmd.send_countdown = 1;
+  readid_cmd.on_data_func_ = [](JandyPump *pump, const std::vector<uint8_t> data) {
+    ESP_LOGI(TAG, "ReadID response: %d bytes", data.size());
+  };
+  queue_command_(readid_cmd);
+
+  // Config page 6 — fire-and-forget with checksum+5 (matching original controller)
   send_fire_and_forget_(JANDY_FUNC_CONFIG, {0x06}, 5);
 
   for (auto item : items_)

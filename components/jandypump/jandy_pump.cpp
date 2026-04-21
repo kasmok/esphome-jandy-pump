@@ -409,7 +409,5 @@ void JandyPump::send_fire_and_forget_(uint8_t func, const std::vector<uint8_t> &
   this->waiting_for_response_ = false;
 }
 
-}
-
 }  // namespace jandy_pump
 }  // namespace esphome

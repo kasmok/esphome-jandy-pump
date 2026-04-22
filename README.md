@@ -1,10 +1,22 @@
 # ESPHome Jandy/Zodiac VS-FHP Pool Pump Controller
 
-Note: This code is pre-alpha and not tested.  Do not use.  I used claude with RS-485 logging and https://github.com/gazoodle/CenturyVSPump 
+Version 0.4 - Working, Alpha
+
+Custom [ESPHome](https://esphome.io/) component to control **Jandy/Zodiac VS-FHP (VSFloPro)** variable-speed pool pumps via RS-485, replacing the original Jandy controller. Exposes pump on/off, target RPM, and current RPM to [Home Assistant](https://www.home-assistant.io/).
+
+## Disclaimer/Warning
+I built this with claude with RS-485 logging and various resources like: https://github.com/gazoodle/CenturyVSPump and https://github.com/aqualinkd
+
+As an amature **I may have overlooked an importaint safety or other issue.**  I am using the this code and belive it to work safely, but use at your own risk.
 
 Feel free to leave feedback.
 
-Custom [ESPHome](https://esphome.io/) component to control **Jandy/Zodiac VS-FHP (VSFloPro)** variable-speed pool pumps via RS-485, replacing the original Jandy controller. Exposes pump on/off, target RPM, and current RPM to [Home Assistant](https://www.home-assistant.io/).
+
+## Installation
+
+### As an ESPHome External Component
+
+Add to your ESPHome YAML the contents of `poolpump.yaml`
 
 ## Hardware
 
@@ -22,53 +34,6 @@ Custom [ESPHome](https://esphome.io/) component to control **Jandy/Zodiac VS-FHP
 | B (DT-)    | YELLOW    | RS-485 B |
 
 > **DIP switch #1** on the ATOMIC RS485 Base: ON = Modbus mode (enables 12V power from pump). Test whether your pump accepts DLE packets with this ON. If not, power the ATOM Lite via USB instead.
-
-## Installation
-
-### As an ESPHome External Component
-
-Add to your ESPHome YAML:
-
-```yaml
-external_components:
-  - source:
-      type: git
-      url: https://github.com/kasmok/esphome-jandy-pump
-      ref: main
-
-uart:
-  id: pump_uart
-  tx_pin: GPIO19   # Adjust for your board
-  rx_pin: GPIO22
-  baud_rate: 9600
-
-jandypump:
-  uart_id: pump_uart
-  flow_control_pin: GPIO23  # DE/RE pin for half-duplex RS-485
-  update_interval: 2s
-
-switch:
-  - platform: jandypump
-    name: "Pool Pump Run"
-
-sensor:
-  - platform: jandypump
-    name: "Pool Pump Current RPM"
-    type: rpm
-    unit_of_measurement: RPM
-
-number:
-  - platform: jandypump
-    name: "Pool Pump Target RPM"
-    unit_of_measurement: RPM
-```
-
-### Local Development
-
-1. Clone this repo
-2. Copy `secrets.yaml.example` to `secrets.yaml` and fill in your values
-3. `esphome compile poolpump.yaml`
-4. `esphome upload poolpump.yaml`
 
 ## Supported Entities
 

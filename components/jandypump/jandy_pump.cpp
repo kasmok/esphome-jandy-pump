@@ -58,9 +58,9 @@ void JandyPump::loop() {
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 void JandyPump::update() {
-  // The original controller's poll cycle order (from minicom.cap) is:
-  //   Status → bare Read Sensor → ReadID page 3 → Config page 6 → [sensors...]
-  // Order matters — the pump NACKs ReadID/Config if Status hasn't been sent first.
+  // Poll cycle based on original controller (minicom.cap) and AqualinkD cross-reference.
+  // AqualinkD confirmed working cycle: Set Demand → Go → Read Sensor → Status → ReadID
+  // We keep Status first for compatibility, then init commands, then sensor polling.
 
   // 1. Status — must be first to "wake" the pump for this cycle
   JandyPumpCommand status_cmd = {};
@@ -76,21 +76,23 @@ void JandyPump::update() {
   };
   queue_command_(status_cmd);
 
-  // 2. Bare Read Sensor (no sensor address) — original controller does this
+  // 2. Bare Read Sensor (page byte only, no sensor address) — original controller does this
+  //    The "bare" command was 78 45 00 [cs] — the 0x00 was the page byte, not "no payload"
   JandyPumpCommand bare_sensor_cmd = {};
   bare_sensor_cmd.pump_ = this;
   bare_sensor_cmd.function_ = JANDY_FUNC_READ_SENSOR;
+  bare_sensor_cmd.payload_ = {0x00};  // page byte only
   bare_sensor_cmd.send_countdown = 1;
   bare_sensor_cmd.on_data_func_ = [](JandyPump *pump, const std::vector<uint8_t> data) {
     ESP_LOGI(TAG, "Bare Read Sensor response: %d bytes", data.size());
   };
   queue_command_(bare_sensor_cmd);
 
-  // 3. ReadID page 3
+  // 3. ReadID page 3 — payload is [0x00] [0x00] [page] (two reserved bytes before page)
   JandyPumpCommand readid_cmd = {};
   readid_cmd.pump_ = this;
   readid_cmd.function_ = JANDY_FUNC_READ_ID;
-  readid_cmd.payload_ = {0x03};
+  readid_cmd.payload_ = {0x00, 0x00, 0x03};
   readid_cmd.send_countdown = 1;
   readid_cmd.on_data_func_ = [](JandyPump *pump, const std::vector<uint8_t> data) {
     ESP_LOGI(TAG, "ReadID response: %d bytes", data.size());
@@ -128,13 +130,13 @@ void JandyPump::send_jandy_raw(const std::vector<uint8_t> &payload, uint8_t cs_o
   for (auto b : payload) {
     frame.push_back(b);
     if (b == 0x10)
-      frame.push_back(0x10);  // DLE escape
+      frame.push_back(0x00);  // DLE escape: 10 00 = literal 0x10
   }
 
   // Checksum (also needs escaping)
   frame.push_back(checksum);
   if (checksum == 0x10)
-    frame.push_back(0x10);
+    frame.push_back(0x00);
 
   frame.push_back(0x10);  // DLE
   frame.push_back(0x03);  // ETX
@@ -199,8 +201,12 @@ void JandyPump::process_rx_byte_(uint8_t byte) {
           process_rx_packet_(this->rx_buffer_);
         }
         this->rx_buffer_.clear();
+      } else if (byte == 0x00) {
+        // DLE NUL — escaped literal 0x10 (Jandy convention: 10 00)
+        this->rx_buffer_.push_back(0x10);
+        this->rx_state_ = RX_DATA;
       } else if (byte == 0x10) {
-        // DLE DLE — escaped literal 0x10
+        // DLE DLE — also accept as escaped literal 0x10 (standard DLE convention)
         this->rx_buffer_.push_back(0x10);
         this->rx_state_ = RX_DATA;
       } else if (byte == 0x02) {
@@ -251,23 +257,24 @@ void JandyPump::process_rx_packet_(const std::vector<uint8_t> &packet) {
     return;
   }
 
-  // Strip leading 0x00 bytes — the pump sends a null preamble byte inside the
-  // DLE frame that wasn't present in the original controller's traffic.
-  // 0x00 doesn't affect the checksum (already validated above).
+  // Packet layout after DLE unframing: [dest] [src/addr] [func] [data...] [checksum]
+  // dest is 0x00 (master) for responses from the pump.
+  // Our minicom.cap was missing the dest byte because minicom strips NUL (0x00).
+  // We skip the dest byte to get to src/func/data.
   size_t offset = 0;
-  while (offset < packet.size() && packet[offset] == 0x00) {
-    offset++;
+  if (packet[0] == 0x00) {
+    offset = 1;  // Skip destination address byte (0x00 = master)
   }
-  // Need at least addr + func + checksum after stripping
+  // Need at least addr + func + checksum after offset
   if (offset + 3 > packet.size()) {
-    ESP_LOGW(TAG, "RX packet too short after stripping null preamble");
+    ESP_LOGW(TAG, "RX packet too short (%d bytes, offset=%d)", packet.size(), offset);
     return;
   }
 
   uint8_t addr = packet[offset];
   uint8_t func = packet[offset + 1];
 
-  // Build data vector: addr + func + data (excluding leading nulls and checksum)
+  // Build data vector: addr + func + data (excluding dest byte and checksum)
   std::vector<uint8_t> data(packet.begin() + offset, packet.end() - 1);
 
   ESP_LOGD(TAG, "RX parsed: addr=0x%02X func=0x%02X data_len=%d", addr, func, data.size());
@@ -370,16 +377,24 @@ JandyPumpCommand JandyPumpCommand::create_read_sensor_command(
   JandyPumpCommand cmd = {};
   cmd.pump_ = pump;
   cmd.function_ = JANDY_FUNC_READ_SENSOR;
+  // Payload: [0x00 (page)] [sensor_addr]
+  cmd.payload_.push_back(0x00);  // page byte (required — was hidden by minicom stripping NUL)
   cmd.payload_.push_back(sensor_addr);
   cmd.on_data_func_ = [=](JandyPump *pump, const std::vector<uint8_t> data) {
-    // Response: [addr=1F] [func=45] [sensor_addr] [val_lo] [val_hi]
-    if (data.size() >= 5) {
-      uint16_t raw = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+    // Response: [addr=1F] [func=45] [rsv=00] [sensor_addr] [val_lo] [val_hi]
+    // data[0]=addr, data[1]=func, data[2]=reserved(0x00), data[3]=sensor, data[4]=lo, data[5]=hi
+    if (data.size() >= 6) {
+      uint16_t raw = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
       float value = (float)raw / (float)scale;
       ESP_LOGD(TAG, "Sensor 0x%02X = %.3f (raw=%d, scale /%d)", sensor_addr, value, raw, scale);
       on_value_func(pump, raw);
-    } else if (data.size() >= 3) {
-      // Short response — possibly no value available
+    } else if (data.size() >= 5) {
+      // Try without reserved byte (fallback for unexpected format)
+      uint16_t raw = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+      float value = (float)raw / (float)scale;
+      ESP_LOGD(TAG, "Sensor 0x%02X = %.3f (raw=%d, scale /%d, short format)", sensor_addr, value, raw, scale);
+      on_value_func(pump, raw);
+    } else {
       ESP_LOGD(TAG, "Sensor 0x%02X: short response (%d bytes)", sensor_addr, data.size());
     }
   };
@@ -421,8 +436,10 @@ JandyPumpCommand JandyPumpCommand::create_set_demand_command(
   JandyPumpCommand cmd = {};
   cmd.pump_ = pump;
   cmd.function_ = JANDY_FUNC_SET_DEMAND;
+  // Payload: [0x00 (page/reserved)] [dem_lo] [dem_hi]
   // Jandy demand = RPM * 4, little-endian
   uint16_t demand = rpm * 4;
+  cmd.payload_.push_back(0x00);  // page/reserved byte (required — was hidden by minicom stripping NUL)
   cmd.payload_.push_back(demand & 0xFF);
   cmd.payload_.push_back((demand >> 8) & 0xFF);
   cmd.on_data_func_ = [=](JandyPump *pump, const std::vector<uint8_t> data) {
@@ -433,9 +450,8 @@ JandyPumpCommand JandyPumpCommand::create_set_demand_command(
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
-// Initialization sequence — mimics the original Jandy controller startup.
-// The pump requires ReadID and Config handshakes before accepting Set Demand
-// or Read Sensor commands. Without this, those commands receive NACK 0x03.
+// Fire-and-forget: send a command without waiting for a response.
+// Used for Config (0x64) which rarely gets responses in normal operation.
 void JandyPump::send_fire_and_forget_(uint8_t func, const std::vector<uint8_t> &payload, uint8_t cs_offset) {
   std::vector<uint8_t> raw;
   raw.push_back(JANDY_PUMP_ADDR);

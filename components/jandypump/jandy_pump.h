@@ -16,7 +16,7 @@
     Packet format:
       10 02  [addr] [func] [data...] [checksum]  10 03
     Checksum = sum(0x10, 0x02, addr, func, data...) & 0xFF
-    Escape:  literal 0x10 in data → transmitted as 10 10
+    Escape:  literal 0x10 in data → transmitted as 10 00 (DLE NUL)
 
     Addresses:
       0x78 = command destination (to pump)

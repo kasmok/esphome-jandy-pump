@@ -17,8 +17,9 @@ void JandyPump::setup() {
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 void JandyPump::dump_config() {
-  ESP_LOGCONFIG(TAG, "Jandy Pump (DLE protocol):");
+  ESP_LOGCONFIG(TAG, "Jandy Pump (DLE protocol) v0.5.0:");
   ESP_LOGCONFIG(TAG, "  Pump address: 0x%02X", JANDY_PUMP_ADDR);
+  ESP_LOGCONFIG(TAG, "  Update interval: %.1fs", this->get_update_interval() / 1000.0f);
   if (this->flow_control_pin_ != nullptr) {
     LOG_PIN("  Flow Control Pin: ", this->flow_control_pin_);
   }
@@ -76,19 +77,7 @@ void JandyPump::update() {
   };
   queue_command_(status_cmd);
 
-  // 2. Bare Read Sensor (page byte only, no sensor address) — original controller does this
-  //    The "bare" command was 78 45 00 [cs] — the 0x00 was the page byte, not "no payload"
-  JandyPumpCommand bare_sensor_cmd = {};
-  bare_sensor_cmd.pump_ = this;
-  bare_sensor_cmd.function_ = JANDY_FUNC_READ_SENSOR;
-  bare_sensor_cmd.payload_ = {0x00};  // page byte only
-  bare_sensor_cmd.send_countdown = 1;
-  bare_sensor_cmd.on_data_func_ = [](JandyPump *pump, const std::vector<uint8_t> data) {
-    ESP_LOGI(TAG, "Bare Read Sensor response: %d bytes", data.size());
-  };
-  queue_command_(bare_sensor_cmd);
-
-  // 3. ReadID page 3 — payload is [0x00] [0x00] [page] (two reserved bytes before page)
+  // 2. ReadID page 3 — payload is [0x00] [0x00] [page] (two reserved bytes before page)
   JandyPumpCommand readid_cmd = {};
   readid_cmd.pump_ = this;
   readid_cmd.function_ = JANDY_FUNC_READ_ID;
@@ -99,10 +88,10 @@ void JandyPump::update() {
   };
   queue_command_(readid_cmd);
 
-  // 4. Config page 6 — fire-and-forget with checksum+5
+  // 3. Config page 6 — fire-and-forget with checksum+5
   send_fire_and_forget_(JANDY_FUNC_CONFIG, {0x06}, 5);
 
-  // 5. Sensor/switch/number polling items
+  // 4. Sensor/switch/number polling items
   for (auto item : items_)
     queue_command_(item->create_command());
 }

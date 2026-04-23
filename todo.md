@@ -4,6 +4,16 @@
 Create a working ESPHome controller for a **Jandy VS-FHP1.0 VSFloPro** variable-speed pool pump
 using M5Stack ATOM Lite + ATOMIC RS485 Base, controlled via Home Assistant.
 
+## Current Status: v0.5.0 - Working, Alpha
+
+All core functionality confirmed working:
+- Start/stop pump via Home Assistant switch
+- Set target RPM (600-3450) via number entity
+- Read all sensors: RPM, motor power, input power, motor current, DC bus voltage
+- Quick-set RPM buttons (600, 2000, 2600, 3450)
+- Safety shutoff: pump stops if HA connection lost (configurable timeout, default 120s)
+- Status LED: green (HA connected), yellow (WiFi only), red (no WiFi)
+
 ## Why CenturyVSPump Doesn't Work
 
 CenturyVSPump sends **EPC Modbus RTU** packets:
@@ -89,26 +99,38 @@ Commands 0x44, 0x45, and 0x46 all require a leading `0x00` "page" byte that mini
 ### Step 2 - Implement DLE protocol engine (jandy_pump.cpp) [DONE]
 ### Step 3 - Implement sensor/switch/number platforms [DONE]
 ### Step 4 - Write poolpump.yaml for the new component [DONE]
-### Step 5 - Compile and test [DONE - compiles clean]
+### Step 5 - Compile and test [DONE]
+### Step 6 - Fix missing 0x00 page bytes [DONE]
+- [x] Add `0x00` page byte to Set Demand command: `78 44 00 [lo] [hi]`
+- [x] Add `0x00` page byte to Read Sensor command: `78 45 00 [sensor_addr]`
+- [x] Add `0x00 0x00` prefix to ReadID command: `78 46 00 00 [page]`
+- [x] Fix DLE escape from `10 10` to `10 00` (TX and RX)
+- [x] Update response parsing for dest `0x00` byte in responses
+- [x] Remove bare Read Sensor from poll cycle (unnecessary, always NACKs)
+- [x] Test: sensors update in HA ✓
+- [x] Test: speed change works ✓
+- [x] Test: ReadID/Config get responses ✓
 
-### Step 6 - Fix missing 0x00 page bytes (CURRENT)
-Apply findings from RESEARCH.md:
-- [ ] Add `0x00` page byte to Set Demand command: `78 44 00 [lo] [hi]`
-- [ ] Add `0x00` page byte to Read Sensor command: `78 45 00 [sensor_addr]`
-- [ ] Add `0x00 0x00` prefix to ReadID command: `78 46 00 00 [page]`
-- [ ] Fix DLE escape from `10 10` to `10 00` (TX and RX)
-- [ ] Update response parsing for extra `0x00` bytes in responses
-- [ ] Update "bare Read Sensor" - was actually `78 45 00` (page byte only)
-- [ ] Test: sensors should update in HA
-- [ ] Test: speed change should work
-- [ ] Test: ReadID/Config should get responses
+### Step 7 - v0.5.0 release [DONE]
+- [x] Add safety shutoff (configurable timeout, default 120s)
+- [x] Update poolpump.yaml with secrets references
+- [x] Update README.md, PROTOCOL.md, todo.md for v0.5.0
+- [x] Add all sensor entities (power, current, voltage)
+- [x] Add quick-set RPM buttons
 
-### Step 7 - Power solution [ ]
+### Step 8 - Power solution [ ]
 DIP switch #1 must be OFF for Jandy DLE protocol -> no 12V from pump.
 Options:
 - USB power brick near the pump equipment
 - Run USB cable from nearby outlet
 - Or: test if DIP #1 ON still responds to DLE packets (some pumps accept both)
+
+### Future improvements
+- [ ] Add pump fault detection and reporting
+- [ ] Add runtime/lifetime hour sensors
+- [ ] Add temperature sensors (ambient, IGBT)
+- [ ] Investigate minimum init handshake sequence
+- [ ] Test with other Jandy pump models
 
 ---
 
@@ -118,5 +140,6 @@ Options:
 - `Gen3-EPC-Modbus-Communication-Protocol-_Rev4.17.pdf` - official Century EPC protocol spec
 - `grok_chat.md` - initial protocol notes, wiring diagram, Arduino sample code
 - `RESEARCH.md` - AqualinkD cross-reference findings (missing 0x00 bytes, DLE escape)
+- `PROTOCOL.md` - full protocol documentation
 - CenturyVSPump source (GitHub: gazoodle/CenturyVSPump) - reference for ESPHome component structure
 - AqualinkD source (GitHub: aqualinkd/AqualinkD) - ePump protocol reference (authoritative)

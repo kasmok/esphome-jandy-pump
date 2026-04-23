@@ -1,3 +1,12 @@
+# ESPHome Jandy/Zodiac VS-FHP Pool Pump Controller v0.5.0
+# https://github.com/kasmok/esphome-jandy-pump
+
+substitutions:
+  # Safety shutoff: seconds to wait after HA disconnects before stopping the pump.
+  # Allows for HA reboots and brief network interruptions without stopping the pump.
+  # Set to "0" to disable (pump keeps running indefinitely without HA).
+  safety_shutoff_timeout: "120"
+
 esphome:
   name: poolpump
   friendly_name: Pool Pump
@@ -15,11 +24,35 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "d/+0AaPIk3jyALexINMpAT8qpg8e8Tx3lI8GnvlPEy4="
+    key: !secret poolpump_api_encryption_key
+  on_client_disconnected:
+    then:
+      - if:
+          condition:
+            lambda: 'return ${safety_shutoff_timeout} > 0;'
+          then:
+            - logger.log:
+                format: "HA disconnected — pump safety shutoff in ${safety_shutoff_timeout}s"
+                level: WARN
+            - delay: ${safety_shutoff_timeout}s
+            - if:
+                condition:
+                  not:
+                    api.connected:
+                then:
+                  - logger.log:
+                      format: "HA still disconnected — stopping pump for safety"
+                      level: ERROR
+                  - switch.turn_off: pump_switch
+  on_client_connected:
+    then:
+      - logger.log:
+          format: "HA connected"
+          level: INFO
 
 ota:
   - platform: esphome
-    password: "1450604975f984cf0b60323cf935288f"
+    password: !secret poolpump_ota_password
 
 wifi:
   ssid: !secret wifi_ssid
@@ -28,7 +61,7 @@ wifi:
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "Poolpump Fallback Hotspot"
-    password: "wBbqgQmpI54n"
+    password: !secret fallback_ap_password
 
 # ------------------------------------------------------------------
 # Status LED (SK6812 on GPIO27) — Red/Yellow/Green connection status
@@ -81,7 +114,7 @@ interval:
 # ------------------------------------------------------------------
 
 external_components:
-  - source: components
+  - source: github://kasmok/esphome-jandy-pump
 
 uart:
   id: pump_uart
@@ -101,6 +134,7 @@ jandypump:
 switch:
   - platform: jandypump
     name: "Pool Pump Run"
+    id: pump_switch
 
 sensor:
   - platform: jandypump
@@ -158,6 +192,13 @@ button:
         - number.set:
             id: id_number_rpm
             value: 600
+  - platform: template
+    name: "Pool Pump 2000 RPM"
+    on_press:
+      then:
+        - number.set:
+            id: id_number_rpm
+            value: 2000
   - platform: template
     name: "Pool Pump 2600 RPM"
     on_press:

@@ -47,11 +47,11 @@ DLE STX (preamble)                     DLE ETX (postamble)
 
 - **Preamble:** `0x10 0x02` (DLE STX)
 - **Postamble:** `0x10 0x03` (DLE ETX)
-- **DLE escape:** A literal `0x10` byte inside the data is transmitted as `0x10 0x10`. The receiver must unescape these.
+- **DLE escape:** A literal `0x10` byte inside the data is transmitted as `0x10 0x00` (DLE NUL). The receiver must unescape these.
 - **DLE in state machine terms:**
   - `10 02` = start of frame
   - `10 03` = end of frame
-  - `10 10` = escaped literal `0x10`
+  - `10 00` = escaped literal `0x10` (Jandy convention — NOT the standard `10 10`)
   - Any other `10 XX` in the data stream is a protocol error
 
 ### Checksum
@@ -102,16 +102,19 @@ Checksum: (0x10 + 0x02 + 0x78 + 0x41) & 0xFF = 0xCB
 
 Pump address is set by DIP switches on the pump PCB. Range `0x78`-`0x81` for pumps 1-4.
 
-### Response Source Addresses
+### Response Addresses
+
+All responses from the pump include a **destination address byte** `0x00` (master/controller) as the first byte after the DLE STX framing. This byte was hidden in the original `minicom.cap` because minicom strips NUL bytes. The response then contains the source address.
 
 The pump uses **different source addresses** depending on the command being responded to:
 
 | Address | Used For |
 |---------|----------|
-| `0x01` | Go (`0x41`) and Stop (`0x42`) acknowledgements |
-| `0x1F` | Status (`0x43`), Set Demand (`0x44`), Read Sensor (`0x45`) responses |
-| `0x20` | Read Identification (`0x46`), Config R/W (`0x64`) responses |
-| `0xFF` | NACK (negative acknowledgement / error) responses |
+| `0x00` | Destination address in all responses (master/controller) |
+| `0x01` | Source for Go (`0x41`) and Stop (`0x42`) acknowledgements |
+| `0x1F` | Source for Status (`0x43`), Set Demand (`0x44`), Read Sensor (`0x45`) responses |
+| `0x20` | Source for Read Identification (`0x46`), Config R/W (`0x64`) responses |
+| `0xFF` | Source for NACK (negative acknowledgement / error) responses |
 
 ---
 
@@ -124,9 +127,9 @@ Starts the motor at the previously set demand speed.
 | Direction | Packet |
 |-----------|--------|
 | Command | `10 02  78 41  [cs]  10 03` |
-| Response (ACK) | `10 02  01 41  [cs]  10 03` |
+| Response (ACK) | `10 02  00  01 41  00  [cs]  10 03` |
 
-No payload. The motor will enter boot mode (`0x09`) and then transition to vector/running mode (`0x0B`).
+No payload. The motor will enter boot mode (`0x09`) and then transition to vector/running mode (`0x0B`). Response includes dest byte `0x00` and a trailing `0x00` after func.
 
 ### 0x42 — Stop
 
@@ -135,9 +138,9 @@ Stops the motor.
 | Direction | Packet |
 |-----------|--------|
 | Command | `10 02  78 42  [cs]  10 03` |
-| Response (ACK) | `10 02  01 42  [cs]  10 03` |
+| Response (ACK) | `10 02  00  01 42  00  [cs]  10 03` |
 
-No payload.
+No payload. Response includes dest byte `0x00` and a trailing `0x00` after func.
 
 ### 0x43 — Status
 
@@ -146,8 +149,8 @@ Queries the current motor status.
 | Direction | Packet |
 |-----------|--------|
 | Command | `10 02  78 43  [cs]  10 03` |
-| Response (stopped) | `10 02  1F 43  [cs]  10 03` |
-| Response (running) | `10 02  1F 43  [status] [pad...]  [cs]  10 03` |
+| Response (stopped) | `10 02  00  1F 43  [cs]  10 03` |
+| Response (running) | `10 02  00  1F 43  [status] [pad...]  [cs]  10 03` |
 
 The status byte values:
 
@@ -168,8 +171,10 @@ Sets the target speed for the motor.
 
 | Direction | Packet |
 |-----------|--------|
-| Command | `10 02  78 44  [dem_lo] [dem_hi]  [cs]  10 03` |
-| Response (ACK) | `10 02  1F 44  [dem_lo] [dem_hi]  [cs]  10 03` |
+| Command | `10 02  78 44  00  [dem_lo] [dem_hi]  [cs]  10 03` |
+| Response (ACK) | `10 02  00  1F 44  00  [dem_lo] [dem_hi]  00  [cs]  10 03` |
+
+The command includes a leading `0x00` page/reserved byte before the demand bytes. This byte was hidden in the original `minicom.cap` because minicom strips NUL bytes. Without this byte, the pump returns NACK code `0x03` (data out of range). Confirmed by [AqualinkD](https://github.com/aqualinkd/AqualinkD) source code.
 
 **Demand encoding:**
 - `demand_value = RPM * 4`
@@ -186,7 +191,7 @@ Sets the target speed for the motor.
 | 2750 | 11000 | `F8 2A` |
 | 3450 | 13800 | `E8 35` |
 
-**Important:** This is a 2-byte payload `[lo, hi]`. The Century EPC Modbus variant uses a 3-byte payload `[mode, lo, hi]` with a mode byte — the Jandy DLE variant omits the mode byte entirely.
+**Important:** The full command payload is 3 bytes: `[00, lo, hi]`. The Century EPC Modbus variant uses a different 3-byte payload `[mode, lo, hi]` with a mode byte — the Jandy DLE variant uses a reserved `0x00` byte instead.
 
 ### 0x45 — Read Sensor
 
@@ -194,8 +199,10 @@ Reads a sensor register from the pump.
 
 | Direction | Packet |
 |-----------|--------|
-| Command | `10 02  78 45  [sensor_addr]  [cs]  10 03` |
-| Response (ACK) | `10 02  1F 45  [sensor_addr] [val_lo] [val_hi]  [cs]  10 03` |
+| Command | `10 02  78 45  00  [sensor_addr]  [cs]  10 03` |
+| Response (ACK) | `10 02  00  1F 45  00  [sensor_addr] [val_lo] [val_hi]  [cs]  10 03` |
+
+The command includes a leading `0x00` page byte before the sensor address. This byte was hidden in `minicom.cap` because minicom strips NUL bytes. Without it, the pump returns NACK code `0x03`. Confirmed by [AqualinkD](https://github.com/aqualinkd/AqualinkD) source code.
 
 **Sensor address map (Page 0):**
 
@@ -238,8 +245,10 @@ Reads pump identification data (model, firmware version, etc.).
 
 | Direction | Packet |
 |-----------|--------|
-| Command | `10 02  78 46  [page]  [cs]  10 03` |
-| Response | `10 02  20 46  [data...]  [cs]  10 03` |
+| Command | `10 02  78 46  00  00  [page]  [cs]  10 03` |
+| Response | `10 02  00  20 46  [data...]  [cs]  10 03` |
+
+The command includes two leading `0x00` reserved bytes before the page number. These bytes were hidden in `minicom.cap` because minicom strips NUL bytes. Confirmed by [AqualinkD](https://github.com/aqualinkd/AqualinkD) source code.
 
 ### 0x64 — Config Read/Write
 
@@ -248,7 +257,7 @@ Reads or writes pump configuration registers.
 | Direction | Packet |
 |-----------|--------|
 | Command | `10 02  78 64  [page]  [cs]  10 03` |
-| Response | `10 02  20 64  [data...]  [cs]  10 03` |
+| Response | `10 02  00  20 64  [data...]  [cs]  10 03` |
 
 ### 0x65 — Store Configuration
 
@@ -257,7 +266,7 @@ Commits configuration changes to non-volatile memory.
 | Direction | Packet |
 |-----------|--------|
 | Command | `10 02  78 65  [cs]  10 03` |
-| Response (ACK) | `10 02  01 65  [cs]  10 03` |
+| Response (ACK) | `10 02  00  01 65  00  [cs]  10 03` |
 
 ---
 
@@ -294,10 +303,11 @@ After this sequence completes, the controller begins normal polling (Status + Re
 
 ### Key Details
 
-- The **bare Read Sensor** (step 2) has no sensor address byte — just `78 45 [cs]`. The pump responds with an ACK but no value.
+- The **bare Read Sensor** (step 2) is `78 45 00 [cs]` — the `0x00` is the page byte only, with no sensor address. The pump responds with an ACK but no value. The `jandypump` component skips this step as it serves no purpose.
+- Commands 0x44, 0x45, and 0x46 all require leading `0x00` page/reserved bytes that were hidden in `minicom.cap` because minicom strips NUL. See individual command sections above.
 - **Config commands must use checksum+5** or the pump silently ignores them, breaking the handshake.
 - **ReadID/Config responses come from addr `0x20`** with checksum+5. Receivers must accept this variant.
-- The minimum required handshake steps are not fully determined — the `jandypump` component replays the full observed sequence to be safe.
+- The minimum required handshake steps are not fully determined — the `jandypump` component replays a simplified version of the observed sequence (Status → ReadID page 3 → Config page 6).
 
 ---
 
@@ -306,7 +316,7 @@ After this sequence completes, the controller begins normal polling (Status + Re
 When the pump rejects a command, it responds with source address `0xFF`:
 
 ```
-10 02  FF  [func]  [nack_code]  [cs]  10 03
+10 02  00  FF  [func]  [nack_code]  [cs]  10 03
 ```
 
 | NACK Code | Meaning |
@@ -331,7 +341,7 @@ The official "Gen3 EPC Modbus Communication Protocol Rev 4.17" describes a Modbu
 | Pump address | `0x78` | `0x15` |
 | ACK byte | None | `0x20` in every command |
 | Demand payload | 2 bytes `[lo, hi]` (RPM x 4) | 3 bytes `[mode, lo, hi]` |
-| DLE escaping | `0x10` -> `0x10 0x10` | N/A (no DLE framing) |
+| DLE escaping | `0x10` -> `0x10 0x00` (DLE NUL) | N/A (no DLE framing) |
 | Byte stuffing | Required for `0x10` in data | None |
 
 This is why the [CenturyVSPump](https://github.com/gazoodle/CenturyVSPump) ESPHome component does not work with Jandy pumps.
@@ -419,11 +429,13 @@ The additional padding bytes do not affect parsing as long as `data[2]` is used 
 
 | Issue | Status | Fix |
 |-------|--------|-----|
-| Leading null byte in responses | **Fixed** | Strip leading `0x00` after checksum validation |
-| Set Demand / Read Sensor NACKs | **Fixed** | Added init handshake sequence (ReadID + Config) |
-| Init handshake silently failing | **Fixed** | Send Config with checksum+5; accept +5 on RX |
-| Sensor values not updating in HA | **Pending test** | Requires successful init handshake (fix above) |
-| Speed change not working | **Pending test** | Requires successful init handshake (fix above) |
+| Leading null byte in responses | **Fixed** | Was actually dest address `0x00` (normal protocol, hidden by minicom). Skip single dest byte. |
+| Set Demand / Read Sensor NACKs | **Fixed** | Added missing `0x00` page bytes to commands (hidden by minicom stripping NUL). |
+| Init handshake silently failing | **Fixed** | Send Config with checksum+5; accept +5 on RX. |
+| DLE escape wrong convention | **Fixed** | Changed from `10 10` to `10 00` (DLE NUL). Confirmed by AqualinkD. |
+| Sensor values not updating in HA | **Fixed** | All sensors reporting correctly after page byte fix. |
+| Speed change not working | **Fixed** | Set Demand works after page byte fix. |
+| All core functionality | **Working** | Start, stop, speed changes, all sensor readings confirmed (v0.5.0). |
 
 ---
 
@@ -445,12 +457,15 @@ python3 pg/parse_cap.py minicom.cap --errors-only      # show problem packets
 
 **minicom strips `0x0B`:** The `minicom.cap` file was recorded using minicom in terminal mode, which silently strips control characters. The byte `0x0B` (ASCII VT / vertical tab) is the most commonly affected, impacting approximately 1,473 of 6,274 packets. `parse_cap.py` detects and reconstructs these missing bytes automatically (labeled `CS:ART` in output).
 
+**minicom strips `0x00`:** minicom also strips NUL bytes. This hid critical `0x00` page/reserved bytes in Set Demand (`0x44`), Read Sensor (`0x45`), and ReadID (`0x46`) commands, as well as the `0x00` destination address byte in all responses. Adding `0x00` to a checksum doesn't change the sum, so there was no way to detect the missing bytes from checksum analysis alone. This was the root cause of all NACK `0x03` errors during initial testing. See `RESEARCH.md` for the full investigation.
+
 **Checksum +5 quirk:** Config (`0x64`) commands and all addr `0x20` responses use checksum+5. This affects both sending and receiving — see [Checksum +5 Quirk](#checksum-5-quirk) for details. Failing to account for this breaks the initialization handshake.
 
 ---
 
 ## References
 
+- [AqualinkD](https://github.com/aqualinkd/AqualinkD) — Authoritative ePump protocol reference (confirmed missing `0x00` bytes and DLE NUL escape)
 - [Gen3 EPC Modbus Communication Protocol Rev 4.17 (PDF)](https://www.troublefreepool.com/) — Official Century/Regal-Beloit protocol spec (Jandy DLE variant differs)
 - [CenturyVSPump ESPHome Component](https://github.com/gazoodle/CenturyVSPump) — Modbus RTU variant (incompatible with Jandy DLE)
 - [Trouble Free Pool: Jandy Pump Protocol](https://www.troublefreepool.com/threads/jandy-pump-protocol.265447/) — Community reverse-engineering discussion

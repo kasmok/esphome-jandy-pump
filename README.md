@@ -1,11 +1,11 @@
 # ESPHome Jandy/Zodiac VS-FHP Pool Pump Controller
 
-Version 0.4 - Working, Alpha
+Version 0.5.0 - Working, Alpha
 
-Custom [ESPHome](https://esphome.io/) component to control **Jandy/Zodiac VS-FHP (VSFloPro)** variable-speed pool pumps via RS-485, replacing the original Jandy controller. Exposes pump on/off, target RPM, and current RPM to [Home Assistant](https://www.home-assistant.io/).
+Custom [ESPHome](https://esphome.io/) component to control **Jandy/Zodiac VS-FHP (VSFloPro)** variable-speed pool pumps via RS-485, replacing the original Jandy controller. Exposes pump on/off, target RPM, sensor data, and quick-set speed buttons to [Home Assistant](https://www.home-assistant.io/).
 
 ## Disclaimer/Warning
-I built this with claude with RS-485 logging and various resources like: https://github.com/gazoodle/CenturyVSPump and https://github.com/aqualinkd
+I built this with Claude with RS-485 logging and various resources like: https://github.com/gazoodle/CenturyVSPump and https://github.com/aqualinkd/AqualinkD
 
 As an amature **I may have overlooked an importaint safety or other issue.**  I am using the this code and belive it to work safely, but use at your own risk.
 
@@ -42,8 +42,29 @@ Add to your ESPHome YAML the contents of `poolpump.yaml`
 | Pool Pump Run | Switch | Start/stop the pump |
 | Pool Pump Target RPM | Number | Set target speed (600-3450 RPM, 50 RPM steps) |
 | Pool Pump Current RPM | Sensor | Read current pump speed |
+| Pool Pump Power | Sensor | Motor output power (W) |
+| Pool Pump Input Power | Sensor | Inverter input power (W) |
+| Pool Pump Motor Current | Sensor | Motor current draw (A) |
+| Pool Pump DC Bus Voltage | Sensor | DC bus voltage (V) |
+| Pool Pump 600/2000/2600/3450 RPM | Buttons | Quick-set speed presets |
 
-Optional sensor types: `watts` (motor power), `custom` (any sensor address).
+## Safety Shutoff
+
+The `poolpump.yaml` config includes a safety feature that automatically stops the pump if communication with Home Assistant is lost. This protects against the pump running indefinitely if HA crashes, the network goes down, or the WiFi drops.
+
+**How it works:**
+1. When the HA API connection drops, a configurable timer starts (default: 120 seconds).
+2. If HA reconnects within the timeout, the timer is cancelled and the pump keeps running.
+3. If HA is still disconnected after the timeout, the pump is stopped.
+
+**Configuration:** Edit the `safety_shutoff_timeout` substitution in `poolpump.yaml`:
+
+```yaml
+substitutions:
+  # Seconds to wait after HA disconnects before stopping the pump.
+  # Set to "0" to disable (pump keeps running indefinitely without HA).
+  safety_shutoff_timeout: "120"
+```
 
 ## Protocol
 
@@ -54,10 +75,11 @@ This component implements the **Jandy DLE-framed variant** of the Century EPC pr
 | Framing | `10 02` ... `10 03` (DLE STX/ETX) | Idle-time gaps |
 | Checksum | 1-byte simple sum | CRC-16 Modbus |
 | Pump address | `0x78` | `0x15` |
-| Demand encoding | 2 bytes `[lo, hi]`, RPM x 4 | 3 bytes `[mode, lo, hi]` |
+| Demand encoding | 3 bytes `[00, lo, hi]`, RPM x 4 | 3 bytes `[mode, lo, hi]` |
+| DLE escaping | `10 00` (DLE NUL) | N/A (no DLE framing) |
 | ACK byte | None | `0x20` in every command |
 
-The protocol was reverse-engineered from captured RS-485 traffic between a working Jandy controller and pump. See `CLAUDE.md` for full protocol documentation.
+The protocol was reverse-engineered from captured RS-485 traffic between a working Jandy controller and pump, and cross-referenced with the [AqualinkD](https://github.com/aqualinkd/AqualinkD) project. See `PROTOCOL.md` for full protocol documentation.
 
 ## Why Not CenturyVSPump?
 
@@ -74,6 +96,12 @@ Likely compatible (same Century EPC motor with Jandy DLE protocol):
 - Other Jandy variable-speed pumps using DLE framing
 
 If you test with a different pump model, please open an issue to report compatibility.
+
+## References
+
+- [AqualinkD](https://github.com/aqualinkd/AqualinkD) - Authoritative ePump protocol reference
+- [CenturyVSPump](https://github.com/gazoodle/CenturyVSPump) - Modbus RTU variant (incompatible)
+- [Gen3 EPC Modbus Communication Protocol Rev 4.17 (PDF)](https://www.troublefreepool.com/) - Official Century EPC spec (Jandy variant differs)
 
 ## License
 
